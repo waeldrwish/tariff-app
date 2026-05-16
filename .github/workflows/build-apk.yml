@@ -1,0 +1,106 @@
+name: Build APK — التعرفة الجمركية
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch: # تشغيل يدوي من GitHub
+
+jobs:
+  build:
+    name: Build Release APK
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. استنساخ الكود ────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Java 17 (مطلوب لبناء Android) ────────────────────────────
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # ── 3. Flutter (أحدث إصدار stable) ───────────────────────────────
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.41.9"
+          channel: stable
+          cache: true
+
+      # ── 4. إنشاء مشروع Flutter كامل (هيكل Android) ──────────────────
+      # نُنشئ مشروعاً جديداً للحصول على android/ الكامل
+      # ثم نستبدل lib/ و pubspec.yaml بملفاتنا المخصصة
+      - name: Create Flutter project skeleton
+        run: |
+          flutter create \
+            --project-name tariff_app \
+            --org com.tariff \
+            --platforms android \
+            /tmp/tariff_skeleton
+
+      - name: Merge custom files into skeleton
+        run: |
+          # انسخ lib/ المخصصة
+          rm -rf /tmp/tariff_skeleton/lib
+          cp -r mobile/lib /tmp/tariff_skeleton/lib
+
+          # انسخ pubspec.yaml المخصصة
+          cp mobile/pubspec.yaml /tmp/tariff_skeleton/pubspec.yaml
+
+          # انسخ AndroidManifest المخصص (صلاحيات الملفات)
+          cp mobile/android/app/src/main/AndroidManifest.xml \
+             /tmp/tariff_skeleton/android/app/src/main/AndroidManifest.xml
+
+      # ── 5. تثبيت الحزم ───────────────────────────────────────────────
+      - name: Get Flutter packages
+        working-directory: /tmp/tariff_skeleton
+        run: flutter pub get
+
+      # ── 6. التحقق من الكود ───────────────────────────────────────────
+      - name: Analyze code
+        working-directory: /tmp/tariff_skeleton
+        run: flutter analyze --no-fatal-infos
+        continue-on-error: true
+
+      # ── 7. بناء APK (Release) ─────────────────────────────────────────
+      - name: Build Release APK
+        working-directory: /tmp/tariff_skeleton
+        run: |
+          flutter build apk \
+            --release \
+            --no-tree-shake-icons \
+            --build-name=1.0.0 \
+            --build-number=${{ github.run_number }}
+
+      # ── 8. نسخ APK لمكان واضح ────────────────────────────────────────
+      - name: Copy APK to output
+        run: |
+          mkdir -p output
+          cp /tmp/tariff_skeleton/build/app/outputs/flutter-apk/app-release.apk \
+             output/tariff-app-v1.0.${{ github.run_number }}.apk
+          ls -lh output/
+
+      # ── 9. رفع APK كـ Artifact للتحميل ──────────────────────────────
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tariff-app-apk
+          path: output/tariff-app-v1.0.${{ github.run_number }}.apk
+          retention-days: 30
+          if-no-files-found: error
+
+      # ── 10. ملخص في صفحة الـ Run ─────────────────────────────────────
+      - name: Build Summary
+        run: |
+          APK_SIZE=$(du -sh output/*.apk | cut -f1)
+          echo "## ✅ APK جاهز للتحميل" >> $GITHUB_STEP_SUMMARY
+          echo "| المعلومة | القيمة |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| الإصدار | 1.0.${{ github.run_number }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| الحجم | $APK_SIZE |" >> $GITHUB_STEP_SUMMARY
+          echo "| Flutter | 3.41.9 |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "⬇️ **حمّل APK من تبويب Artifacts أعلاه**" >> $GITHUB_STEP_SUMMARY

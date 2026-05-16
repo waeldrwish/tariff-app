@@ -1,0 +1,34 @@
+name: tariff_app
+description: تطبيق التعرفة الجمركية — يعمل بالكامل بدون إنترنت
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.2.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # قاعدة بيانات محلية على الهاتف
+  sqflite: ^2.3.2
+  path: ^1.9.0
+  path_provider: ^2.1.2
+
+  # قراءة PDF على الجهاز
+  syncfusion_flutter_pdf: ^25.1.35
+
+  # اختيار الملفات
+  file_picker: ^8.0.3
+
+  # واجهة المستخدم
+  google_fonts: ^6.2.1
+  shimmer: ^3.0.0
+  flutter_animate: ^4.5.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.0
+
+flutter:
+  uses-material-design: true

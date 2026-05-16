@@ -1,0 +1,30 @@
+# بيئة التطوير
+/home/wael/dev/
+*.tar.xz
+*.tar.gz
+*.zip
+
+# Python backend
+backend/__pycache__/
+backend/*.pyc
+backend/tariff.db
+backend/uploads/
+backend/venv/
+backend/.venv/
+
+# Flutter
+mobile/build/
+mobile/.dart_tool/
+mobile/.flutter-plugins
+mobile/.flutter-plugins-dependencies
+mobile/.packages
+mobile/pubspec.lock
+
+# Android build
+mobile/android/.gradle/
+mobile/android/local.properties
+mobile/android/app/build/
+
+# OS
+.DS_Store
+Thumbs.db
