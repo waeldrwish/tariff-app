@@ -1,8 +1,9 @@
 import 'dart:io';
 import 'package:syncfusion_flutter_pdf/pdf.dart';
 
-/// يقرأ ملف PDF على الجهاز ويستخرج أصناف التعرفة منه
-/// — لا يحتاج إنترنت، كل المعالجة تجري محلياً
+/// يقرأ ملف PDF على الجهاز ويستخرج أصناف التعرفة منه.
+/// يُستدعى دائماً من داخل Isolate منفصل عبر _pdfWorkerEntry في admin_screen.dart
+/// حتى لا يتجمد Main Thread.
 class PdfImportService {
   // نمط رقم HS Code: يبدأ بأرقام وقد يحتوي نقاط
   static final _hsRegex = RegExp(r'^\d{2,12}([.\-]\d+)*$');

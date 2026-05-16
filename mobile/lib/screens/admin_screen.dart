@@ -1,9 +1,57 @@
 import 'dart:io';
+import 'dart:isolate';
+
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_animate/flutter_animate.dart';
+
 import '../services/local_db_service.dart';
 import '../services/pdf_import_service.dart';
+
+// ═══════════════════════════════════════════════════════════════════════
+// رسائل بين Main Isolate وBackground Isolate
+// يجب أن تكون top-level (خارج أي class) لكي يقبلها SendPort
+// ═══════════════════════════════════════════════════════════════════════
+
+class _WorkerArgs {
+  final String filePath;
+  final SendPort sendPort;
+  const _WorkerArgs(this.filePath, this.sendPort);
+}
+
+class _ProgressMsg {
+  final int current, total;
+  final String text;
+  const _ProgressMsg(this.current, this.total, this.text);
+}
+
+class _ResultMsg {
+  final List<Map<String, String>> items;
+  const _ResultMsg(this.items);
+}
+
+class _ErrorMsg {
+  final String error;
+  const _ErrorMsg(this.error);
+}
+
+/// نقطة دخول الـ Isolate — يجب أن تكون top-level
+void _pdfWorkerEntry(_WorkerArgs args) async {
+  try {
+    final items = await PdfImportService().parse(
+      args.filePath,
+      onProgress: (cur, tot, msg) =>
+          args.sendPort.send(_ProgressMsg(cur, tot, msg)),
+    );
+    args.sendPort.send(_ResultMsg(items));
+  } catch (e, st) {
+    args.sendPort.send(_ErrorMsg('$e\n$st'));
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// الشاشة الرئيسية
+// ═══════════════════════════════════════════════════════════════════════
 
 class AdminScreen extends StatefulWidget {
   const AdminScreen({super.key});
@@ -14,7 +62,6 @@ class AdminScreen extends StatefulWidget {
 
 class _AdminScreenState extends State<AdminScreen> {
   final _db = LocalDbService();
-  final _parser = PdfImportService();
 
   List<ImportedFile> _files = [];
   Map<String, int> _stats = {'total_items': 0, 'total_files': 0};
@@ -28,25 +75,45 @@ class _AdminScreenState extends State<AdminScreen> {
   String _lastStatus = '';
   bool _lastWasError = false;
 
+  // للتنظيف عند الخروج
+  Isolate? _workerIsolate;
+  ReceivePort? _receivePort;
+
   @override
   void initState() {
     super.initState();
     _refresh();
   }
 
+  @override
+  void dispose() {
+    _killWorker();
+    super.dispose();
+  }
+
+  void _killWorker() {
+    _workerIsolate?.kill(priority: Isolate.immediate);
+    _receivePort?.close();
+    _workerIsolate = null;
+    _receivePort = null;
+  }
+
   Future<void> _refresh() async {
     setState(() => _loadingFiles = true);
     try {
-      final results = await Future.wait([_db.listFiles(), _db.getStats()]);
-      setState(() {
-        _files = results[0] as List<ImportedFile>;
-        _stats = results[1] as Map<String, int>;
-      });
+      final results =
+          await Future.wait([_db.listFiles(), _db.getStats()]);
+      if (mounted) {
+        setState(() {
+          _files = results[0] as List<ImportedFile>;
+          _stats = results[1] as Map<String, int>;
+        });
+      }
     } catch (_) {}
-    setState(() => _loadingFiles = false);
+    if (mounted) setState(() => _loadingFiles = false);
   }
 
-  // ─── اختيار PDF واستيراده ──────────────────────────────────────────
+  // ─── اختيار PDF واستيراده في Isolate منفصل ───────────────────────
   Future<void> _pickAndImport() async {
     final result = await FilePicker.platform.pickFiles(
       type: FileType.custom,
@@ -65,44 +132,83 @@ class _AdminScreenState extends State<AdminScreen> {
       _lastStatus = '';
     });
 
+    // ─── إنشاء قناة تواصل مع الـ Isolate ───
+    final receivePort = ReceivePort();
+    _receivePort = receivePort;
+
     try {
-      // قراءة وتحليل PDF على الجهاز
-      final items = await _parser.parse(
-        filePath,
-        onProgress: (cur, tot, msg) {
-          setState(() {
-            _progressCurrent = cur;
-            _progressTotal = tot;
-            _progressMsg = msg;
-          });
-        },
+      // إطلاق الـ Isolate — المعالجة تجري بالخلفية بدون تجميد الواجهة
+      _workerIsolate = await Isolate.spawn(
+        _pdfWorkerEntry,
+        _WorkerArgs(filePath, receivePort.sendPort),
+        errorsAreFatal: false,
+        debugName: 'pdf_parser',
       );
+    } catch (e) {
+      _setStatus('تعذّر إطلاق معالج PDF: $e', isError: true);
+      setState(() => _importing = false);
+      receivePort.close();
+      return;
+    }
 
-      if (items.isEmpty) {
-        _setStatus(
-          'لم يُعثر على جداول قابلة للقراءة.\n'
-          'تأكد أن PDF يحتوي على نصوص وليس صوراً ممسوحة ضوئياً.',
-          isError: true,
-        );
-        return;
+    List<Map<String, String>>? items;
+    String? errorText;
+
+    // ─── استقبال الرسائل من الـ Isolate ───
+    await for (final msg in receivePort) {
+      if (!mounted) break;
+
+      if (msg is _ProgressMsg) {
+        setState(() {
+          _progressCurrent = msg.current;
+          _progressTotal = msg.total;
+          _progressMsg = msg.text;
+        });
+      } else if (msg is _ResultMsg) {
+        items = msg.items;
+        break;
+      } else if (msg is _ErrorMsg) {
+        errorText = msg.error;
+        break;
       }
+    }
 
-      setState(() => _progressMsg = 'جاري الحفظ في قاعدة البيانات...');
+    _killWorker();
 
-      // حفظ في SQLite المحلي
-      final count =
-          await _db.insertItems(items.cast<Map<String, String>>(), filename);
+    if (!mounted) return;
 
+    // ─── معالجة النتيجة ───
+    if (errorText != null) {
+      _setStatus('فشل تحليل الملف:\n$errorText', isError: true);
+      setState(() => _importing = false);
+      return;
+    }
+
+    if (items == null || items.isEmpty) {
+      _setStatus(
+        'لم يُعثر على جداول قابلة للقراءة.\n'
+        'تأكد أن PDF يحتوي على نصوص وليس صوراً ممسوحة ضوئياً.',
+        isError: true,
+      );
+      setState(() => _importing = false);
+      return;
+    }
+
+    // ─── حفظ في SQLite (سريع، لا يحتاج isolate) ───
+    setState(() => _progressMsg = 'جاري الحفظ في قاعدة البيانات...');
+    try {
+      final count = await _db.insertItems(items, filename);
       _setStatus('تم استيراد $count صنف من "$filename" بنجاح ✓');
       await _refresh();
     } catch (e) {
-      _setStatus('خطأ أثناء المعالجة:\n$e', isError: true);
+      _setStatus('فشل الحفظ: $e', isError: true);
     } finally {
-      setState(() => _importing = false);
+      if (mounted) setState(() => _importing = false);
     }
   }
 
   void _setStatus(String msg, {bool isError = false}) {
+    if (!mounted) return;
     setState(() {
       _lastStatus = msg;
       _lastWasError = isError;
@@ -124,8 +230,7 @@ class _AdminScreenState extends State<AdminScreen> {
           ),
           FilledButton(
             onPressed: () => Navigator.pop(context, true),
-            style:
-                FilledButton.styleFrom(backgroundColor: Colors.red),
+            style: FilledButton.styleFrom(backgroundColor: Colors.red),
             child: const Text('حذف'),
           ),
         ],
@@ -139,34 +244,25 @@ class _AdminScreenState extends State<AdminScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final colors = Theme.of(context).colorScheme;
-
     return Scaffold(
       appBar: AppBar(
         title: const Text('استيراد التعرفة'),
         actions: [
           IconButton(
             icon: const Icon(Icons.refresh),
-            onPressed: _refresh,
+            onPressed: _importing ? null : _refresh,
           ),
         ],
       ),
       body: RefreshIndicator(
-        onRefresh: _refresh,
+        onRefresh: _importing ? () async {} : _refresh,
         child: ListView(
           padding: const EdgeInsets.all(16),
           children: [
-            // ─── إحصائيات ───
             _StatsRow(stats: _stats).animate().fadeIn(),
-
             const SizedBox(height: 16),
-
-            // ─── لافتة "بدون إنترنت" ───
             _OfflineBadge().animate().fadeIn(delay: 80.ms),
-
             const SizedBox(height: 16),
-
-            // ─── بطاقة الاستيراد ───
             _ImportCard(
               importing: _importing,
               current: _progressCurrent,
@@ -176,10 +272,7 @@ class _AdminScreenState extends State<AdminScreen> {
               isError: _lastWasError,
               onImport: _pickAndImport,
             ).animate().fadeIn(delay: 120.ms),
-
             const SizedBox(height: 20),
-
-            // ─── قائمة الملفات ───
             Text(
               'الملفات المستوردة',
               style: Theme.of(context).textTheme.titleMedium?.copyWith(
@@ -187,14 +280,12 @@ class _AdminScreenState extends State<AdminScreen> {
                   ),
             ),
             const SizedBox(height: 10),
-
             if (_loadingFiles)
               const Center(
-                child: Padding(
-                  padding: EdgeInsets.all(24),
-                  child: CircularProgressIndicator(),
-                ),
-              )
+                  child: Padding(
+                padding: EdgeInsets.all(24),
+                child: CircularProgressIndicator(),
+              ))
             else if (_files.isEmpty)
               _EmptyFiles()
             else
@@ -225,22 +316,19 @@ class _OfflineBadge extends StatelessWidget {
         borderRadius: BorderRadius.circular(12),
         border: Border.all(color: Colors.green.shade200),
       ),
-      child: Row(
-        children: [
-          Icon(Icons.wifi_off, color: Colors.green.shade700, size: 20),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(
-              'يعمل بدون إنترنت — البيانات محفوظة على هاتفك مباشرة',
-              style: TextStyle(
+      child: Row(children: [
+        Icon(Icons.wifi_off, color: Colors.green.shade700, size: 20),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Text(
+            'يعمل بدون إنترنت — البيانات محفوظة على هاتفك مباشرة',
+            style: TextStyle(
                 color: Colors.green.shade800,
                 fontSize: 13,
-                fontWeight: FontWeight.w500,
-              ),
-            ),
+                fontWeight: FontWeight.w500),
           ),
-        ],
-      ),
+        ),
+      ]),
     );
   }
 }
@@ -252,27 +340,25 @@ class _StatsRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Row(
-      children: [
-        Expanded(
-          child: _Stat(
-            icon: Icons.inventory_2_outlined,
-            label: 'إجمالي الأصناف',
-            value: '${stats['total_items'] ?? 0}',
-            color: Theme.of(context).colorScheme.primary,
-          ),
+    return Row(children: [
+      Expanded(
+        child: _Stat(
+          icon: Icons.inventory_2_outlined,
+          label: 'إجمالي الأصناف',
+          value: '${stats['total_items'] ?? 0}',
+          color: Theme.of(context).colorScheme.primary,
         ),
-        const SizedBox(width: 10),
-        Expanded(
-          child: _Stat(
-            icon: Icons.picture_as_pdf,
-            label: 'ملفات مستوردة',
-            value: '${stats['total_files'] ?? 0}',
-            color: Theme.of(context).colorScheme.secondary,
-          ),
+      ),
+      const SizedBox(width: 10),
+      Expanded(
+        child: _Stat(
+          icon: Icons.picture_as_pdf,
+          label: 'ملفات مستوردة',
+          value: '${stats['total_files'] ?? 0}',
+          color: Theme.of(context).colorScheme.secondary,
         ),
-      ],
-    );
+      ),
+    ]);
   }
 }
 
@@ -297,11 +383,9 @@ class _Stat extends StatelessWidget {
         child: Column(children: [
           Icon(icon, color: color, size: 28),
           const SizedBox(height: 6),
-          Text(
-            value,
-            style: TextStyle(
-                fontSize: 22, fontWeight: FontWeight.bold, color: color),
-          ),
+          Text(value,
+              style: TextStyle(
+                  fontSize: 22, fontWeight: FontWeight.bold, color: color)),
           Text(label,
               style: const TextStyle(fontSize: 11),
               textAlign: TextAlign.center),
@@ -332,6 +416,7 @@ class _ImportCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
+    // إذا total=0 → لم نبدأ بعد → شريط غير محدد
     final progress = total > 0 ? current / total : null;
 
     return Card(
@@ -340,101 +425,106 @@ class _ImportCard extends StatelessWidget {
           RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
       child: Padding(
         padding: const EdgeInsets.all(24),
-        child: Column(
-          children: [
-            // أيقونة
-            Container(
-              width: 80,
-              height: 80,
-              decoration: BoxDecoration(
-                color: cs.primaryContainer,
-                shape: BoxShape.circle,
+        child: Column(children: [
+          // الأيقونة
+          Container(
+            width: 80,
+            height: 80,
+            decoration: BoxDecoration(
+                color: cs.primaryContainer, shape: BoxShape.circle),
+            child: importing
+                ? Padding(
+                    padding: const EdgeInsets.all(22),
+                    child: CircularProgressIndicator(
+                      value: progress, // null = indeterminate
+                      strokeWidth: 3,
+                      color: cs.primary,
+                    ),
+                  )
+                : Icon(Icons.picture_as_pdf, size: 40, color: cs.primary),
+          ),
+          const SizedBox(height: 12),
+
+          Text(
+            importing ? 'جاري المعالجة...' : 'استيراد ملف التعرفة',
+            style: Theme.of(context)
+                .textTheme
+                .titleMedium
+                ?.copyWith(fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 4),
+
+          if (importing) ...[
+            const SizedBox(height: 10),
+            // شريط التقدم (محدد أو غير محدد)
+            ClipRRect(
+              borderRadius: BorderRadius.circular(4),
+              child: LinearProgressIndicator(
+                value: progress,
+                minHeight: 6,
+                backgroundColor: cs.surfaceVariant,
               ),
-              child: importing
-                  ? Padding(
-                      padding: const EdgeInsets.all(20),
-                      child: CircularProgressIndicator(
-                        value: progress,
-                        strokeWidth: 3,
-                        color: cs.primary,
-                      ),
-                    )
-                  : Icon(Icons.picture_as_pdf,
-                      size: 40, color: cs.primary),
             ),
-            const SizedBox(height: 12),
-
-            Text(
-              importing ? 'جاري معالجة الملف...' : 'استيراد ملف التعرفة',
-              style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                    fontWeight: FontWeight.bold,
-                  ),
-            ),
-            const SizedBox(height: 4),
-
+            const SizedBox(height: 8),
             // رسالة الحالة
-            if (importing)
-              Column(children: [
-                const SizedBox(height: 8),
-                LinearProgressIndicator(
-                  value: progress,
-                  backgroundColor: cs.surfaceVariant,
-                  borderRadius: BorderRadius.circular(4),
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  msg,
-                  style: TextStyle(fontSize: 12, color: cs.primary),
-                  textAlign: TextAlign.center,
-                ),
-              ])
-            else ...[
+            Text(
+              msg,
+              style: TextStyle(fontSize: 12, color: cs.primary),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 6),
+            // تفصيل الصفحات إن توفّر
+            if (total > 0)
               Text(
-                'يُقرأ الملف كاملاً على هاتفك — لا يُرسل لأي سيرفر',
+                'صفحة $current من $total',
                 style: TextStyle(
-                    fontSize: 12, color: cs.onSurfaceVariant),
-                textAlign: TextAlign.center,
+                    fontSize: 11, color: cs.onSurfaceVariant),
               ),
-              const SizedBox(height: 16),
-              SizedBox(
+          ] else ...[
+            Text(
+              'يُعالَج الملف في الخلفية — الواجهة لا تتجمد',
+              style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 16),
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton.icon(
+                icon: const Icon(Icons.upload_file),
+                label: const Text('اختر ملف PDF من هاتفك'),
+                onPressed: onImport,
+              ),
+            ),
+            if (lastStatus.isNotEmpty) ...[
+              const SizedBox(height: 10),
+              Container(
                 width: double.infinity,
-                child: ElevatedButton.icon(
-                  icon: const Icon(Icons.upload_file),
-                  label: const Text('اختر ملف PDF من هاتفك'),
-                  onPressed: onImport,
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: isError
+                      ? Colors.red.shade50
+                      : Colors.green.shade50,
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(
+                    color: isError
+                        ? Colors.red.shade200
+                        : Colors.green.shade200,
+                  ),
+                ),
+                child: Text(
+                  lastStatus,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: isError
+                        ? Colors.red.shade800
+                        : Colors.green.shade800,
+                  ),
                 ),
               ),
-              if (lastStatus.isNotEmpty) ...[
-                const SizedBox(height: 10),
-                Container(
-                  width: double.infinity,
-                  padding: const EdgeInsets.all(10),
-                  decoration: BoxDecoration(
-                    color: isError
-                        ? Colors.red.shade50
-                        : Colors.green.shade50,
-                    borderRadius: BorderRadius.circular(10),
-                    border: Border.all(
-                      color: isError
-                          ? Colors.red.shade200
-                          : Colors.green.shade200,
-                    ),
-                  ),
-                  child: Text(
-                    lastStatus,
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: isError
-                          ? Colors.red.shade800
-                          : Colors.green.shade800,
-                    ),
-                  ),
-                ),
-              ],
             ],
           ],
-        ),
+        ]),
       ),
     );
   }
@@ -447,19 +537,15 @@ class _EmptyFiles extends StatelessWidget {
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(32),
-        child: Column(
-          children: [
-            Icon(Icons.folder_open,
-                size: 56,
-                color: Theme.of(context).colorScheme.outline),
-            const SizedBox(height: 8),
-            Text(
-              'لا توجد ملفات مستوردة بعد',
+        child: Column(children: [
+          Icon(Icons.folder_open,
+              size: 56,
+              color: Theme.of(context).colorScheme.outline),
+          const SizedBox(height: 8),
+          Text('لا توجد ملفات مستوردة بعد',
               style: TextStyle(
-                  color: Theme.of(context).colorScheme.outline),
-            ),
-          ],
-        ),
+                  color: Theme.of(context).colorScheme.outline)),
+        ]),
       ),
     );
   }
@@ -469,7 +555,6 @@ class _EmptyFiles extends StatelessWidget {
 class _FileCard extends StatelessWidget {
   final ImportedFile file;
   final VoidCallback onDelete;
-
   const _FileCard({required this.file, required this.onDelete});
 
   @override
@@ -487,16 +572,14 @@ class _FileCard extends StatelessWidget {
             color: Colors.red.withOpacity(0.1),
             borderRadius: BorderRadius.circular(10),
           ),
-          child:
-              const Icon(Icons.picture_as_pdf, color: Colors.red, size: 24),
+          child: const Icon(Icons.picture_as_pdf,
+              color: Colors.red, size: 24),
         ),
-        title: Text(
-          file.filename,
-          style: const TextStyle(
-              fontWeight: FontWeight.w600, fontSize: 13),
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-        ),
+        title: Text(file.filename,
+            style: const TextStyle(
+                fontWeight: FontWeight.w600, fontSize: 13),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis),
         subtitle: Text(
           '${file.itemCount} صنف  |  ${file.importedAt.split("T").first}',
           style: const TextStyle(fontSize: 11),
