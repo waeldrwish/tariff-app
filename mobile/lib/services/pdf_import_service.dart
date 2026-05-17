@@ -12,7 +12,8 @@ class PdfImportService {
   static const _headerWords = {
     'hs', 'code', 'رقم', 'بند', 'item', 'اسم', 'duty', 'rate',
     'fees', 'الصنف', 'الرسم', 'رسوم', 'إجمالي', 'وصف', 'description',
-    'رسم', 'نسبة', 'البيان', 'total', 'الرسوم',
+    'رسم', 'نسبة', 'البيان', 'total', 'الرسوم', 'المادة', 'الاسم',
+    'بدل', 'خدمات', 'نوع', 'الوحدة', 'تصدير', 'استيراد', 'كامل',
   };
 
   Future<List<Map<String, String>>> parse(
@@ -131,9 +132,12 @@ class PdfImportService {
     out.add({
       'hs_code': hsCode,
       'item_name': _get(parts, hsIdx + 1),
-      'duty_rate': _get(parts, hsIdx + 2),
-      'total_fees': _get(parts, hsIdx + 3),
-      'description': _get(parts, hsIdx + 4),
+      'duty_rate': _get(parts, hsIdx + 2),        // رسم الاستيراد
+      'service_fee': _get(parts, hsIdx + 3),      // بدل خدمات
+      'total_fees': _get(parts, hsIdx + 4),       // رسم الاستيراد كامل
+      'unit_type': _get(parts, hsIdx + 5),        // نوع الوحدة
+      'export_duty': _get(parts, hsIdx + 6),      // رسم التصدير
+      'export_service_fee': _get(parts, hsIdx + 7), // رسم خدمات تصدير
     });
   }
 

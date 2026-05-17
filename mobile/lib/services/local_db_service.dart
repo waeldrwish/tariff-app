@@ -20,17 +20,21 @@ class LocalDbService {
     final path = join(await getDatabasesPath(), 'tariff_v1.db');
     return openDatabase(
       path,
-      version: 1,
+      version: 2,
       onCreate: (db, _) async {
         await db.execute('''
           CREATE TABLE tariff_items (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            hs_code     TEXT NOT NULL DEFAULT '',
-            item_name   TEXT NOT NULL DEFAULT '',
-            duty_rate   TEXT DEFAULT '',
-            total_fees  TEXT DEFAULT '',
-            description TEXT DEFAULT '',
-            source_file TEXT DEFAULT ''
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            hs_code           TEXT NOT NULL DEFAULT '',
+            item_name         TEXT NOT NULL DEFAULT '',
+            duty_rate         TEXT DEFAULT '',
+            service_fee       TEXT DEFAULT '',
+            total_fees        TEXT DEFAULT '',
+            unit_type         TEXT DEFAULT '',
+            export_duty       TEXT DEFAULT '',
+            export_service_fee TEXT DEFAULT '',
+            description       TEXT DEFAULT '',
+            source_file       TEXT DEFAULT ''
           )
         ''');
         await db.execute(
@@ -46,6 +50,18 @@ class LocalDbService {
             imported_at TEXT DEFAULT (datetime('now','localtime'))
           )
         ''');
+      },
+      onUpgrade: (db, oldVersion, newVersion) async {
+        if (oldVersion < 2) {
+          await db.execute(
+              "ALTER TABLE tariff_items ADD COLUMN service_fee TEXT DEFAULT ''");
+          await db.execute(
+              "ALTER TABLE tariff_items ADD COLUMN unit_type TEXT DEFAULT ''");
+          await db.execute(
+              "ALTER TABLE tariff_items ADD COLUMN export_duty TEXT DEFAULT ''");
+          await db.execute(
+              "ALTER TABLE tariff_items ADD COLUMN export_service_fee TEXT DEFAULT ''");
+        }
       },
     );
   }

@@ -165,17 +165,53 @@ class _FeesCard extends StatelessWidget {
             const Divider(height: 24),
             _FeeRow(
               icon: Icons.percent,
-              label: 'رسوم الصنف',
-              value: item.dutyRate.isEmpty ? 'غير محدد' : item.dutyRate,
+              label: 'رسم الاستيراد',
+              value: item.dutyRate.isEmpty ? '—' : item.dutyRate,
               highlight: true,
             ),
+            if (item.serviceFee.isNotEmpty) ...[
+              const SizedBox(height: 12),
+              _FeeRow(
+                icon: Icons.miscellaneous_services_outlined,
+                label: 'بدل الخدمات',
+                value: item.serviceFee,
+                highlight: false,
+              ),
+            ],
             const SizedBox(height: 12),
             _FeeRow(
               icon: Icons.calculate_outlined,
-              label: 'الرسم الكامل (الإجمالي)',
-              value: item.totalFees.isEmpty ? 'غير محدد' : item.totalFees,
+              label: 'رسم الاستيراد كامل',
+              value: item.totalFees.isEmpty ? '—' : item.totalFees,
               highlight: false,
             ),
+            if (item.unitType.isNotEmpty) ...[
+              const SizedBox(height: 12),
+              _FeeRow(
+                icon: Icons.straighten_outlined,
+                label: 'نوع الوحدة',
+                value: item.unitType,
+                highlight: false,
+              ),
+            ],
+            if (item.exportDuty.isNotEmpty) ...[
+              const SizedBox(height: 12),
+              _FeeRow(
+                icon: Icons.output_outlined,
+                label: 'رسم التصدير',
+                value: item.exportDuty,
+                highlight: false,
+              ),
+            ],
+            if (item.exportServiceFee.isNotEmpty) ...[
+              const SizedBox(height: 12),
+              _FeeRow(
+                icon: Icons.local_shipping_outlined,
+                label: 'رسم خدمات التصدير \$ / الطن',
+                value: item.exportServiceFee,
+                highlight: false,
+              ),
+            ],
           ],
         ),
       ),
