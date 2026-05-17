@@ -6,13 +6,6 @@ import 'package:excel/excel.dart';
 class ExcelImportService {
   static final _hsRegex = RegExp(r'^\d{2,12}([.\-]\d+)*$');
 
-  static const _headerWords = {
-    'hs', 'code', 'رقم', 'بند', 'item', 'اسم', 'duty', 'rate',
-    'fees', 'الصنف', 'الرسم', 'رسوم', 'إجمالي', 'وصف', 'description',
-    'رسم', 'نسبة', 'البيان', 'total', 'الرسوم', 'المادة', 'الاسم',
-    'بدل', 'خدمات', 'نوع', 'الوحدة', 'تصدير', 'استيراد', 'كامل',
-  };
-
   Future<List<Map<String, String>>> parse(
     String filePath, {
     void Function(int current, int total, String msg)? onProgress,
@@ -40,9 +33,9 @@ class ExcelImportService {
           );
         }
 
+        // نحتفظ بكل الخلايا بما فيها الفارغة للحفاظ على المواضع الصحيحة للأعمدة
         final parts = rows[r]
             .map((cell) => _cellText(cell))
-            .where((t) => t.isNotEmpty)
             .toList();
 
         _tryExtract(parts, items, seenCodes);
@@ -64,9 +57,7 @@ class ExcelImportService {
     List<Map<String, String>> out,
     Set<String> seen,
   ) {
-    if (parts.length < 2) return;
-    if (_isHeader(parts.first)) return;
-
+    // نبحث عن HS code أولاً - إذا لم يوجد فالصف ليس بيانات
     int hsIdx = -1;
     for (int i = 0; i < parts.length; i++) {
       if (_looksLikeHs(parts[i])) {
@@ -95,11 +86,6 @@ class ExcelImportService {
   bool _looksLikeHs(String s) {
     final clean = s.replaceAll(RegExp(r'[\s ]'), '');
     return _hsRegex.hasMatch(clean) && clean.length >= 2;
-  }
-
-  bool _isHeader(String s) {
-    final lower = s.toLowerCase();
-    return _headerWords.any((w) => lower.contains(w));
   }
 
   String _get(List<String> list, int i) =>
