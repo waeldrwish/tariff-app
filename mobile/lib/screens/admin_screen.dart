@@ -5,6 +5,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 
+import '../services/excel_import_service.dart';
 import '../services/local_db_service.dart';
 import '../services/pdf_import_service.dart';
 
@@ -16,7 +17,8 @@ import '../services/pdf_import_service.dart';
 class _WorkerArgs {
   final String filePath;
   final SendPort sendPort;
-  const _WorkerArgs(this.filePath, this.sendPort);
+  final bool isExcel;
+  const _WorkerArgs(this.filePath, this.sendPort, {this.isExcel = false});
 }
 
 class _ProgressMsg {
@@ -36,13 +38,22 @@ class _ErrorMsg {
 }
 
 /// نقطة دخول الـ Isolate — يجب أن تكون top-level
-void _pdfWorkerEntry(_WorkerArgs args) async {
+void _fileWorkerEntry(_WorkerArgs args) async {
   try {
-    final items = await PdfImportService().parse(
-      args.filePath,
-      onProgress: (cur, tot, msg) =>
-          args.sendPort.send(_ProgressMsg(cur, tot, msg)),
-    );
+    final List<Map<String, String>> items;
+    if (args.isExcel) {
+      items = await ExcelImportService().parse(
+        args.filePath,
+        onProgress: (cur, tot, msg) =>
+            args.sendPort.send(_ProgressMsg(cur, tot, msg)),
+      );
+    } else {
+      items = await PdfImportService().parse(
+        args.filePath,
+        onProgress: (cur, tot, msg) =>
+            args.sendPort.send(_ProgressMsg(cur, tot, msg)),
+      );
+    }
     args.sendPort.send(_ResultMsg(items));
   } catch (e, st) {
     args.sendPort.send(_ErrorMsg('$e\n$st'));
@@ -113,16 +124,18 @@ class _AdminScreenState extends State<AdminScreen> {
     if (mounted) setState(() => _loadingFiles = false);
   }
 
-  // ─── اختيار PDF واستيراده في Isolate منفصل ───────────────────────
+  // ─── اختيار PDF أو Excel واستيراده في Isolate منفصل ───────────────
   Future<void> _pickAndImport() async {
     final result = await FilePicker.platform.pickFiles(
       type: FileType.custom,
-      allowedExtensions: ['pdf'],
+      allowedExtensions: ['pdf', 'xlsx', 'xls'],
     );
     if (result == null || result.files.single.path == null) return;
 
     final filePath = result.files.single.path!;
     final filename = result.files.single.name;
+    final ext = filename.split('.').last.toLowerCase();
+    final isExcel = ext == 'xlsx' || ext == 'xls';
 
     setState(() {
       _importing = true;
@@ -137,15 +150,14 @@ class _AdminScreenState extends State<AdminScreen> {
     _receivePort = receivePort;
 
     try {
-      // إطلاق الـ Isolate — المعالجة تجري بالخلفية بدون تجميد الواجهة
       _workerIsolate = await Isolate.spawn(
-        _pdfWorkerEntry,
-        _WorkerArgs(filePath, receivePort.sendPort),
+        _fileWorkerEntry,
+        _WorkerArgs(filePath, receivePort.sendPort, isExcel: isExcel),
         errorsAreFatal: false,
-        debugName: 'pdf_parser',
+        debugName: isExcel ? 'excel_parser' : 'pdf_parser',
       );
     } catch (e) {
-      _setStatus('تعذّر إطلاق معالج PDF: $e', isError: true);
+      _setStatus('تعذّر إطلاق معالج الملف: $e', isError: true);
       setState(() => _importing = false);
       receivePort.close();
       return;
@@ -352,7 +364,7 @@ class _StatsRow extends StatelessWidget {
       const SizedBox(width: 10),
       Expanded(
         child: _Stat(
-          icon: Icons.picture_as_pdf,
+          icon: Icons.folder_copy_outlined,
           label: 'ملفات مستوردة',
           value: '${stats['total_files'] ?? 0}',
           color: Theme.of(context).colorScheme.secondary,
@@ -441,12 +453,12 @@ class _ImportCard extends StatelessWidget {
                       color: cs.primary,
                     ),
                   )
-                : Icon(Icons.picture_as_pdf, size: 40, color: cs.primary),
+                : Icon(Icons.upload_file, size: 40, color: cs.primary),
           ),
           const SizedBox(height: 12),
 
           Text(
-            importing ? 'جاري المعالجة...' : 'استيراد ملف التعرفة',
+            importing ? 'جاري المعالجة...' : 'استيراد ملف التعرفة (PDF أو Excel)',
             style: Theme.of(context)
                 .textTheme
                 .titleMedium
@@ -491,7 +503,7 @@ class _ImportCard extends StatelessWidget {
               width: double.infinity,
               child: ElevatedButton.icon(
                 icon: const Icon(Icons.upload_file),
-                label: const Text('اختر ملف PDF من هاتفك'),
+                label: const Text('اختر ملف PDF أو Excel'),
                 onPressed: onImport,
               ),
             ),
@@ -557,8 +569,16 @@ class _FileCard extends StatelessWidget {
   final VoidCallback onDelete;
   const _FileCard({required this.file, required this.onDelete});
 
+  bool get _isExcel {
+    final ext = file.filename.split('.').last.toLowerCase();
+    return ext == 'xlsx' || ext == 'xls';
+  }
+
   @override
   Widget build(BuildContext context) {
+    final color = _isExcel ? Colors.green : Colors.red;
+    final icon = _isExcel ? Icons.table_chart : Icons.picture_as_pdf;
+
     return Card(
       margin: const EdgeInsets.only(bottom: 8),
       elevation: 0,
@@ -569,11 +589,10 @@ class _FileCard extends StatelessWidget {
           width: 44,
           height: 44,
           decoration: BoxDecoration(
-            color: Colors.red.withOpacity(0.1),
+            color: color.withOpacity(0.1),
             borderRadius: BorderRadius.circular(10),
           ),
-          child: const Icon(Icons.picture_as_pdf,
-              color: Colors.red, size: 24),
+          child: Icon(icon, color: color, size: 24),
         ),
         title: Text(file.filename,
             style: const TextStyle(

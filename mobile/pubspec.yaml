@@ -17,6 +17,9 @@ dependencies:
   # قراءة PDF على الجهاز
   syncfusion_flutter_pdf: ^25.1.35
 
+  # قراءة Excel على الجهاز
+  excel: ^4.0.6
+
   # اختيار الملفات
   file_picker: ^8.0.3
 

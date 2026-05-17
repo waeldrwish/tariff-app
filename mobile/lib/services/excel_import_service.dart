@@ -1,0 +1,103 @@
+import 'dart:io';
+import 'package:excel/excel.dart';
+
+/// يقرأ ملف Excel (.xlsx/.xls) ويستخرج أصناف التعرفة منه.
+/// يُستدعى دائماً من داخل Isolate منفصل عبر _fileWorkerEntry في admin_screen.dart
+class ExcelImportService {
+  static final _hsRegex = RegExp(r'^\d{2,12}([.\-]\d+)*$');
+
+  static const _headerWords = {
+    'hs', 'code', 'رقم', 'بند', 'item', 'اسم', 'duty', 'rate',
+    'fees', 'الصنف', 'الرسم', 'رسوم', 'إجمالي', 'وصف', 'description',
+    'رسم', 'نسبة', 'البيان', 'total', 'الرسوم',
+  };
+
+  Future<List<Map<String, String>>> parse(
+    String filePath, {
+    void Function(int current, int total, String msg)? onProgress,
+  }) async {
+    final bytes = await File(filePath).readAsBytes();
+    final workbook = Excel.decodeBytes(bytes);
+
+    final items = <Map<String, String>>[];
+    final seenCodes = <String>{};
+
+    final sheetNames = workbook.tables.keys.toList();
+    final totalSheets = sheetNames.length;
+
+    for (int s = 0; s < totalSheets; s++) {
+      final sheet = workbook.tables[sheetNames[s]]!;
+      final rows = sheet.rows;
+      final totalRows = rows.length;
+
+      for (int r = 0; r < totalRows; r++) {
+        if (r % 100 == 0) {
+          onProgress?.call(
+            s * totalRows + r,
+            totalSheets * totalRows,
+            'معالجة الورقة ${s + 1} من $totalSheets، صف $r من $totalRows...',
+          );
+        }
+
+        final parts = rows[r]
+            .map((cell) => _cellText(cell))
+            .where((t) => t.isNotEmpty)
+            .toList();
+
+        _tryExtract(parts, items, seenCodes);
+      }
+    }
+
+    return items;
+  }
+
+  String _cellText(Data? cell) {
+    if (cell == null) return '';
+    final v = cell.value;
+    if (v == null) return '';
+    return v.toString().trim();
+  }
+
+  void _tryExtract(
+    List<String> parts,
+    List<Map<String, String>> out,
+    Set<String> seen,
+  ) {
+    if (parts.length < 2) return;
+    if (_isHeader(parts.first)) return;
+
+    int hsIdx = -1;
+    for (int i = 0; i < parts.length; i++) {
+      if (_looksLikeHs(parts[i])) {
+        hsIdx = i;
+        break;
+      }
+    }
+    if (hsIdx < 0) return;
+
+    final hsCode = parts[hsIdx];
+    if (seen.contains(hsCode)) return;
+    seen.add(hsCode);
+
+    out.add({
+      'hs_code': hsCode,
+      'item_name': _get(parts, hsIdx + 1),
+      'duty_rate': _get(parts, hsIdx + 2),
+      'total_fees': _get(parts, hsIdx + 3),
+      'description': _get(parts, hsIdx + 4),
+    });
+  }
+
+  bool _looksLikeHs(String s) {
+    final clean = s.replaceAll(RegExp(r'[\s ]'), '');
+    return _hsRegex.hasMatch(clean) && clean.length >= 2;
+  }
+
+  bool _isHeader(String s) {
+    final lower = s.toLowerCase();
+    return _headerWords.any((w) => lower.contains(w));
+  }
+
+  String _get(List<String> list, int i) =>
+      i < list.length ? list[i] : '';
+}
